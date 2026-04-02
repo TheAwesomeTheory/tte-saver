@@ -1,0 +1,11 @@
+# Video files (too large for git)
+*.mp4
+*.mov
+*.m4v
+
+# Build artifacts
+AustinSaver/build/
+AustinSaver/test_app
+
+# macOS
+.DS_Store
