@@ -213,6 +213,7 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundPlayer: AVQueuePlayer?
     private var backgroundLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
+    private var displayTimer: Timer?
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -242,10 +243,16 @@ class AustinSaverView: ScreenSaverView {
     override func startAnimation() {
         super.startAnimation()
         setupLayers()
+        // Use our own timer — legacyScreenSaver throttles animateOneFrame() to ~12fps
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.renderNextFrame()
+        }
     }
 
     override func stopAnimation() {
         super.stopAnimation()
+        displayTimer?.invalidate()
+        displayTimer = nil
         NotificationCenter.default.removeObserver(self)
         backgroundPlayer?.pause()
         backgroundPlayer = nil
@@ -355,6 +362,10 @@ class AustinSaverView: ScreenSaverView {
     private var lastLogTime: Double = 0
 
     override func animateOneFrame() {
+        // No-op: we use our own timer to bypass legacyScreenSaver throttling
+    }
+
+    private func renderNextFrame() {
         guard !effects.isEmpty, let ovLayer = overlayLayer else { return }
 
         let effect = effects[currentEffectIndex % effects.count]
