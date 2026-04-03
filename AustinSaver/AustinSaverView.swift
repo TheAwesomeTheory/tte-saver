@@ -214,6 +214,7 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
+    private var renderPending = false
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -254,8 +255,12 @@ class AustinSaverView: ScreenSaverView {
         }
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
+            // Skip if previous render hasn't completed — prevents frame bunching
+            guard !view.renderPending else { return kCVReturnSuccess }
+            view.renderPending = true
             DispatchQueue.main.async {
                 view.renderNextFrame()
+                view.renderPending = false
             }
             return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque())
@@ -408,8 +413,7 @@ class AustinSaverView: ScreenSaverView {
                 NSLog("AustinSaver: render=%.1fms, actual fps=%.0f, chars=\(frame.characters.count)", avgMs, actualFps)
                 lastLogTime = now
             }
-            // 1.5x speed: alternate between advancing 1 and 2 frames
-            currentFrameIndex += (currentFrameIndex % 2 == 0) ? 2 : 1
+            currentFrameIndex += 1
         } else {
             // Effect finished — pause on final frame then advance
             pauseCounter = pauseFrames
