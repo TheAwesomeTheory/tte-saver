@@ -108,9 +108,18 @@ class TTEFrameRenderer {
         cachedViewSize = .zero // Force recalculation
     }
 
+    // Cache for CTLines keyed by symbol + color
+    private var lineCache: [UInt64: CTLine] = [:]
+
+    private func cacheKey(symbol: String, r: UInt8, g: UInt8, b: UInt8) -> UInt64 {
+        let symHash = UInt64(symbol.hashValue & 0xFFFFFFFF)
+        return (symHash << 24) | (UInt64(r) << 16) | (UInt64(g) << 8) | UInt64(b)
+    }
+
     func renderFrame(_ frame: TTEFrame, viewSize: CGSize, scale: CGFloat) -> CGImage? {
         if viewSize != cachedViewSize {
             recalculateLayout(viewSize: viewSize)
+            lineCache.removeAll()
         }
 
         let pixelWidth = Int(viewSize.width * scale)
@@ -129,39 +138,55 @@ class TTEFrameRenderer {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        // Scale for retina — no context flip, we handle y-mapping manually
         ctx.scaleBy(x: scale, y: scale)
-
-        // Transparent background (black = transparent via screen blend)
         ctx.clear(CGRect(x: 0, y: 0, width: viewSize.width, height: viewSize.height))
 
         guard let font = cachedFont else { return ctx.makeImage() }
+        let descender = CTFontGetDescent(font)
 
         for char in frame.characters {
             let x = cachedXOffset + CGFloat(char.column - 1) * cachedCellWidth
-            // ANSI row 1 = top of screen. CG y=0 = bottom. So row 1 → highest y.
-            // Subtract descender to close vertical gaps between block characters.
-            let descender = CTFontGetDescent(font)
             let y = viewSize.height - cachedYOffset - CGFloat(char.row) * cachedCellHeight - descender
 
-            let color = CGColor(
-                red: CGFloat(char.r) / 255.0,
-                green: CGFloat(char.g) / 255.0,
-                blue: CGFloat(char.b) / 255.0,
-                alpha: 1.0
-            )
+            ctx.setFillColor(red: CGFloat(char.r) / 255.0,
+                           green: CGFloat(char.g) / 255.0,
+                           blue: CGFloat(char.b) / 255.0,
+                           alpha: 1.0)
 
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font as Any,
-                .foregroundColor: NSColor(cgColor: color) as Any
-            ]
-            let attrStr = NSAttributedString(string: char.symbol, attributes: attributes)
-            let line = CTLineCreateWithAttributedString(attrStr)
-
-            ctx.saveGState()
-            ctx.textPosition = CGPoint(x: x, y: y)
-            CTLineDraw(line, ctx)
-            ctx.restoreGState()
+            // Block characters: draw as filled rectangles (fast path)
+            switch char.symbol {
+            case "█":
+                ctx.fill(CGRect(x: x, y: y, width: cachedCellWidth, height: cachedCellHeight))
+            case "▄":
+                ctx.fill(CGRect(x: x, y: y, width: cachedCellWidth, height: cachedCellHeight / 2))
+            case "▀":
+                ctx.fill(CGRect(x: x, y: y + cachedCellHeight / 2, width: cachedCellWidth, height: cachedCellHeight / 2))
+            case "▌":
+                ctx.fill(CGRect(x: x, y: y, width: cachedCellWidth / 2, height: cachedCellHeight))
+            case "▐":
+                ctx.fill(CGRect(x: x + cachedCellWidth / 2, y: y, width: cachedCellWidth / 2, height: cachedCellHeight))
+            default:
+                // Non-block chars: use cached CTLine
+                let key = cacheKey(symbol: char.symbol, r: char.r, g: char.g, b: char.b)
+                let line: CTLine
+                if let cached = lineCache[key] {
+                    line = cached
+                } else {
+                    let color = NSColor(red: CGFloat(char.r) / 255.0,
+                                       green: CGFloat(char.g) / 255.0,
+                                       blue: CGFloat(char.b) / 255.0,
+                                       alpha: 1.0)
+                    let attributes: [NSAttributedString.Key: Any] = [
+                        .font: font as Any,
+                        .foregroundColor: color
+                    ]
+                    let attrStr = NSAttributedString(string: char.symbol, attributes: attributes)
+                    line = CTLineCreateWithAttributedString(attrStr)
+                    lineCache[key] = line
+                }
+                ctx.textPosition = CGPoint(x: x, y: y)
+                CTLineDraw(line, ctx)
+            }
         }
 
         return ctx.makeImage()
@@ -243,13 +268,47 @@ class AustinSaverView: ScreenSaverView {
         let assetsBase = findAssetsDirectory()
         NSLog("AustinSaver: Assets dir = \(assetsBase.path)")
 
-        // Load background videos
-        let bgVideos = findFiles(in: assetsBase.appendingPathComponent(backgroundsFolder), extensions: ["mp4", "mov", "m4v"])
+        // Load background videos — use Apple's built-in aerials, fall back to bundled
+        let appleAerialDirs = [
+            "/Library/Application Support/com.apple.idleassetsd/Customer/4KSDR240FPS",
+            "/Library/Application Support/com.apple.idleassetsd/Customer/4KSDR",
+            "/Library/Application Support/com.apple.idleassetsd/Customer/4KHDR",
+        ]
+        var bgVideos: [URL] = []
+        for dir in appleAerialDirs {
+            let url = URL(fileURLWithPath: dir)
+            let found = findFiles(in: url, extensions: ["mov", "mp4", "m4v"])
+            bgVideos.append(contentsOf: found)
+        }
+        // Fall back to bundled backgrounds if no Apple aerials found
+        if bgVideos.isEmpty {
+            bgVideos = findFiles(in: assetsBase.appendingPathComponent(backgroundsFolder), extensions: ["mp4", "mov", "m4v"])
+        }
+        NSLog("AustinSaver: Found \(bgVideos.count) background videos")
 
         // Load TTE effect data
         let tteFiles = findFiles(in: assetsBase.appendingPathComponent(effectsFolder), extensions: ["tte"])
-        effects = tteFiles.compactMap { TTEBinaryLoader.load(from: $0) }.shuffled()
-        NSLog("AustinSaver: Loaded \(effects.count) effects, \(bgVideos.count) backgrounds")
+        // Sort by modification date (newest first) so the latest effect plays first
+        let sortedFiles = tteFiles.sorted { a, b in
+            let aDate = (try? FileManager.default.attributesOfItem(atPath: a.path)[.modificationDate] as? Date) ?? Date.distantPast
+            let bDate = (try? FileManager.default.attributesOfItem(atPath: b.path)[.modificationDate] as? Date) ?? Date.distantPast
+            return aDate > bDate
+        }
+        // Load ONLY the first effect immediately, load rest in background
+        if let first = sortedFiles.first, let firstEffect = TTEBinaryLoader.load(from: first) {
+            effects = [firstEffect]
+            NSLog("AustinSaver: Loaded first effect, loading \(sortedFiles.count - 1) more in background")
+
+            let remaining = Array(sortedFiles.dropFirst())
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let rest = remaining.compactMap { TTEBinaryLoader.load(from: $0) }.shuffled()
+                DispatchQueue.main.async {
+                    self?.effects.append(contentsOf: rest)
+                    NSLog("AustinSaver: Background loading complete. Total: \(self?.effects.count ?? 0) effects")
+                }
+            }
+        }
+        NSLog("AustinSaver: \(bgVideos.count) backgrounds")
 
         // Setup background video
         if let bgVideo = bgVideos.randomElement() {
@@ -364,15 +423,15 @@ class AustinSaverView: ScreenSaverView {
             }
         }
 
-        let hardcoded = URL(fileURLWithPath: "/Users/austin/Library/Application Support/AustinScreenSaver")
+        let home = NSHomeDirectory()
+        let hardcoded = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/AustinScreenSaver")
         let fxFiles = (try? FileManager.default.contentsOfDirectory(atPath: hardcoded.appendingPathComponent(effectsFolder).path)) ?? []
         NSLog("AustinSaver: Hardcoded path effects = \(fxFiles.count)")
         if !fxFiles.isEmpty {
             return hardcoded
         }
 
-        let home = NSHomeDirectory()
-        return URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/AustinScreenSaver")
+        return hardcoded
     }
 
     private func findFiles(in directory: URL, extensions: [String]) -> [URL] {
