@@ -242,6 +242,8 @@ class AustinSaverView: ScreenSaverView {
 
     override func startAnimation() {
         super.startAnimation()
+        // Guard against multiple calls
+        if displayTimer != nil { return }
         setupLayers()
         // Use our own timer — legacyScreenSaver throttles animateOneFrame() to ~12fps
         displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -295,20 +297,14 @@ class AustinSaverView: ScreenSaverView {
 
         // Load TTE effect data
         let tteFiles = findFiles(in: assetsBase.appendingPathComponent(effectsFolder), extensions: ["tte"])
-        // Sort by modification date (newest first) so the latest effect plays first
-        let sortedFiles = tteFiles.sorted { a, b in
-            let aDate = (try? FileManager.default.attributesOfItem(atPath: a.path)[.modificationDate] as? Date) ?? Date.distantPast
-            let bDate = (try? FileManager.default.attributesOfItem(atPath: b.path)[.modificationDate] as? Date) ?? Date.distantPast
-            return aDate > bDate
-        }
-        // Load ONLY the first effect immediately, load rest in background
-        if let first = sortedFiles.first, let firstEffect = TTEBinaryLoader.load(from: first) {
+        let shuffledFiles = tteFiles.shuffled()
+        if let first = shuffledFiles.first, let firstEffect = TTEBinaryLoader.load(from: first) {
             effects = [firstEffect]
-            NSLog("AustinSaver: Loaded first effect, loading \(sortedFiles.count - 1) more in background")
+            NSLog("AustinSaver: Loaded first effect, loading \(shuffledFiles.count - 1) more in background")
 
-            let remaining = Array(sortedFiles.dropFirst())
+            let remaining = Array(shuffledFiles.dropFirst())
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let rest = remaining.compactMap { TTEBinaryLoader.load(from: $0) }.shuffled()
+                let rest = remaining.compactMap { TTEBinaryLoader.load(from: $0) }
                 DispatchQueue.main.async {
                     self?.effects.append(contentsOf: rest)
                     NSLog("AustinSaver: Background loading complete. Total: \(self?.effects.count ?? 0) effects")
@@ -409,6 +405,8 @@ class AustinSaverView: ScreenSaverView {
     private func advanceEffect() {
         currentEffectIndex += 1
         currentFrameIndex = 0
+        // Clear the overlay so previous effect doesn't linger
+        overlayLayer?.contents = nil
 
         // Reshuffle when we've gone through all
         if currentEffectIndex >= effects.count {
