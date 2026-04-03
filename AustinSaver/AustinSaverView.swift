@@ -214,7 +214,6 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
-    private var renderPending = false
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -255,13 +254,7 @@ class AustinSaverView: ScreenSaverView {
         }
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
-            // Skip if previous render hasn't completed — prevents frame bunching
-            guard !view.renderPending else { return kCVReturnSuccess }
-            view.renderPending = true
-            DispatchQueue.main.async {
-                view.renderNextFrame()
-                view.renderPending = false
-            }
+            view.renderNextFrame()
             return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque())
         CVDisplayLinkStart(displayLink)
@@ -360,6 +353,10 @@ class AustinSaverView: ScreenSaverView {
         layer.addSublayer(ovLayer)
         self.overlayLayer = ovLayer
 
+        // Cache size/scale for thread-safe access from CVDisplayLink
+        cachedLayerSize = ovLayer.bounds.size
+        cachedScale = self.window?.backingScaleFactor ?? 2.0
+
         // Configure renderer for first effect
         if let effect = effects.first {
             renderer.configure(gridWidth: effect.gridWidth, gridHeight: effect.gridHeight)
@@ -380,8 +377,12 @@ class AustinSaverView: ScreenSaverView {
         // No-op: we use our own timer to bypass legacyScreenSaver throttling
     }
 
+    // Cache these for thread-safe access from CVDisplayLink thread
+    private var cachedScale: CGFloat = 2.0
+    private var cachedLayerSize: CGSize = .zero
+
     private func renderNextFrame() {
-        guard !effects.isEmpty, let ovLayer = overlayLayer else { return }
+        guard !effects.isEmpty else { return }
 
         let effect = effects[currentEffectIndex % effects.count]
 
@@ -389,20 +390,33 @@ class AustinSaverView: ScreenSaverView {
         if pauseCounter > 0 {
             pauseCounter -= 1
             if pauseCounter == 0 {
-                advanceEffect()
+                DispatchQueue.main.async { [weak self] in
+                    self?.advanceEffect()
+                }
             }
             return
         }
 
-        // Render current frame
+        // Render current frame — this runs on CVDisplayLink's high-priority thread
         if currentFrameIndex < effect.frames.count {
             let start = CACurrentMediaTime()
             let frame = effect.frames[currentFrameIndex]
-            let scale = self.window?.backingScaleFactor ?? 2.0
-            if let image = renderer.renderFrame(frame, viewSize: ovLayer.bounds.size, scale: scale) {
-                ovLayer.contents = image
-                ovLayer.contentsScale = scale
+
+            // Use cached values (set from main thread in setupLayers)
+            let size = cachedLayerSize
+            let scale = cachedScale
+
+            if size.width > 0, let image = renderer.renderFrame(frame, viewSize: size, scale: scale) {
+                // Only touch CALayer on main — use immediate transaction
+                DispatchQueue.main.async { [weak self] in
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    self?.overlayLayer?.contents = image
+                    self?.overlayLayer?.contentsScale = scale
+                    CATransaction.commit()
+                }
             }
+
             let elapsed = CACurrentMediaTime() - start
             frameTimeAccum += elapsed
             frameCount += 1
