@@ -213,7 +213,7 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundPlayer: AVQueuePlayer?
     private var backgroundLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
-    private var displayTimer: Timer?
+    private var displayLink: CVDisplayLink?
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -243,18 +243,32 @@ class AustinSaverView: ScreenSaverView {
     override func startAnimation() {
         super.startAnimation()
         // Guard against multiple calls
-        if displayTimer != nil { return }
+        if displayLink != nil { return }
         setupLayers()
-        // Use our own timer — legacyScreenSaver throttles animateOneFrame() to ~12fps
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.renderNextFrame()
+        // Use CVDisplayLink — runs on a dedicated high-priority thread synced to display refresh
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let displayLink = link else {
+            NSLog("AustinSaver: Failed to create CVDisplayLink")
+            return
         }
+        CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
+            let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
+            DispatchQueue.main.async {
+                view.renderNextFrame()
+            }
+            return kCVReturnSuccess
+        }, Unmanaged.passUnretained(self).toOpaque())
+        CVDisplayLinkStart(displayLink)
+        self.displayLink = displayLink
     }
 
     override func stopAnimation() {
         super.stopAnimation()
-        displayTimer?.invalidate()
-        displayTimer = nil
+        if let link = displayLink {
+            CVDisplayLinkStop(link)
+        }
+        displayLink = nil
         NotificationCenter.default.removeObserver(self)
         backgroundPlayer?.pause()
         backgroundPlayer = nil
