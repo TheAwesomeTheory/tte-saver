@@ -3,31 +3,209 @@ import AVFoundation
 import AVKit
 import QuartzCore
 import CoreImage
+import CoreText
+
+// MARK: - Binary Format Structs
+
+struct TTECharacter {
+    let column: Int
+    let row: Int
+    let symbol: String
+    let r: UInt8
+    let g: UInt8
+    let b: UInt8
+}
+
+struct TTEFrame {
+    let characters: [TTECharacter]
+}
+
+struct TTEEffect {
+    let name: String
+    let gridWidth: Int
+    let gridHeight: Int
+    let frames: [TTEFrame]
+}
+
+// MARK: - Binary Loader
+
+class TTEBinaryLoader {
+    static func load(from url: URL) -> TTEEffect? {
+        guard let data = try? Data(contentsOf: url) else {
+            NSLog("AustinSaver: Failed to read file: \(url.lastPathComponent)")
+            return nil
+        }
+
+        guard data.count >= 12 else {
+            NSLog("AustinSaver: File too small: \(url.lastPathComponent)")
+            return nil
+        }
+
+        // Check magic
+        let magic = String(data: data[0..<4], encoding: .ascii)
+        guard magic == "TTE1" else {
+            NSLog("AustinSaver: Bad magic in \(url.lastPathComponent)")
+            return nil
+        }
+
+        let gridWidth = Int(data[4]) | (Int(data[5]) << 8)
+        let gridHeight = Int(data[6]) | (Int(data[7]) << 8)
+        let frameCount = Int(data[8]) | (Int(data[9]) << 8) | (Int(data[10]) << 16) | (Int(data[11]) << 24)
+
+        var offset = 12
+        var frames: [TTEFrame] = []
+
+        for _ in 0..<frameCount {
+            guard offset + 2 <= data.count else { break }
+            let charCount = Int(data[offset]) | (Int(data[offset + 1]) << 8)
+            offset += 2
+
+            var chars: [TTECharacter] = []
+            for _ in 0..<charCount {
+                guard offset + 3 <= data.count else { break }
+                let col = Int(data[offset])
+                let row = Int(data[offset + 1])
+                let symLen = Int(data[offset + 2])
+                offset += 3
+
+                guard offset + symLen + 3 <= data.count else { break }
+                let symData = data[offset..<(offset + symLen)]
+                let sym = String(data: symData, encoding: .utf8) ?? "?"
+                offset += symLen
+
+                let r = data[offset]
+                let g = data[offset + 1]
+                let b = data[offset + 2]
+                offset += 3
+
+                chars.append(TTECharacter(column: col, row: row, symbol: sym, r: r, g: g, b: b))
+            }
+            frames.append(TTEFrame(characters: chars))
+        }
+
+        let name = url.deletingPathExtension().lastPathComponent
+        NSLog("AustinSaver: Loaded \(name): \(gridWidth)x\(gridHeight), \(frames.count) frames")
+        return TTEEffect(name: name, gridWidth: gridWidth, gridHeight: gridHeight, frames: frames)
+    }
+}
+
+// MARK: - Core Text Frame Renderer
+
+class TTEFrameRenderer {
+    private var cachedFont: CTFont?
+    private var cachedFontSize: CGFloat = 0
+    private var cachedViewSize: CGSize = .zero
+    private var cachedCellWidth: CGFloat = 0
+    private var cachedCellHeight: CGFloat = 0
+    private var cachedXOffset: CGFloat = 0
+    private var cachedYOffset: CGFloat = 0
+    private var gridWidth: Int = 1
+    private var gridHeight: Int = 1
+
+    func configure(gridWidth: Int, gridHeight: Int) {
+        self.gridWidth = gridWidth
+        self.gridHeight = gridHeight
+        cachedViewSize = .zero // Force recalculation
+    }
+
+    func renderFrame(_ frame: TTEFrame, viewSize: CGSize, scale: CGFloat) -> CGImage? {
+        if viewSize != cachedViewSize {
+            recalculateLayout(viewSize: viewSize)
+        }
+
+        let pixelWidth = Int(viewSize.width * scale)
+        let pixelHeight = Int(viewSize.height * scale)
+
+        guard pixelWidth > 0, pixelHeight > 0 else { return nil }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: pixelWidth * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Scale for retina — no context flip, we handle y-mapping manually
+        ctx.scaleBy(x: scale, y: scale)
+
+        // Transparent background (black = transparent via screen blend)
+        ctx.clear(CGRect(x: 0, y: 0, width: viewSize.width, height: viewSize.height))
+
+        guard let font = cachedFont else { return ctx.makeImage() }
+
+        for char in frame.characters {
+            let x = cachedXOffset + CGFloat(char.column - 1) * cachedCellWidth
+            // ANSI row 1 = top of screen. CG y=0 = bottom. So row 1 → highest y.
+            // Subtract descender to close vertical gaps between block characters.
+            let descender = CTFontGetDescent(font)
+            let y = viewSize.height - cachedYOffset - CGFloat(char.row) * cachedCellHeight - descender
+
+            let color = CGColor(
+                red: CGFloat(char.r) / 255.0,
+                green: CGFloat(char.g) / 255.0,
+                blue: CGFloat(char.b) / 255.0,
+                alpha: 1.0
+            )
+
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font as Any,
+                .foregroundColor: NSColor(cgColor: color) as Any
+            ]
+            let attrStr = NSAttributedString(string: char.symbol, attributes: attributes)
+            let line = CTLineCreateWithAttributedString(attrStr)
+
+            ctx.saveGState()
+            ctx.textPosition = CGPoint(x: x, y: y)
+            CTLineDraw(line, ctx)
+            ctx.restoreGState()
+        }
+
+        return ctx.makeImage()
+    }
+
+    private func recalculateLayout(viewSize: CGSize) {
+        cachedViewSize = viewSize
+        // Fill the full view — grid maps 1:1 to screen
+        cachedCellWidth = viewSize.width / CGFloat(gridWidth)
+        cachedCellHeight = viewSize.height / CGFloat(gridHeight)
+        // fontSize = cellHeight so block chars (█ ▄ ▀) fill the entire cell
+        cachedFontSize = cachedCellHeight
+        cachedFont = CTFontCreateWithName("Menlo-Bold" as CFString, cachedFontSize, nil)
+        cachedXOffset = 0
+        cachedYOffset = 0
+    }
+}
+
+// MARK: - Main Screensaver View
 
 class AustinSaverView: ScreenSaverView {
 
-    // MARK: - Properties
-
+    // Background video
     private var backgroundPlayer: AVQueuePlayer?
     private var backgroundLayer: AVPlayerLayer?
-    private var overlayPlayer: AVQueuePlayer?
-    private var overlayLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
-    private var watchdogTimer: Timer?
-    private var statusObservation: NSKeyValueObservation?
 
-    private var overlayClips: [URL] = []
-    private var currentOverlayIndex = 0
+    // TTE overlay
+    private var overlayLayer: CALayer?
+    private var renderer = TTEFrameRenderer()
+    private var effects: [TTEEffect] = []
+    private var currentEffectIndex = 0
+    private var currentFrameIndex = 0
+    private var pauseCounter = 0
+    private let pauseFrames = 60 // ~2 seconds at 30fps
 
-    // Where to find the assets
-    private let effectsFolder = "AustinEffects"
     private let backgroundsFolder = "AustinBackgrounds"
+    private let effectsFolder = "AustinEffects"
 
     // MARK: - Lifecycle
 
     override init?(frame: NSRect, isPreview: Bool) {
         super.init(frame: frame, isPreview: isPreview)
-        animationTimeInterval = 1.0 / 30.0
+        animationTimeInterval = 1.0 / 60.0
         wantsLayer = true
     }
 
@@ -43,20 +221,14 @@ class AustinSaverView: ScreenSaverView {
 
     override func stopAnimation() {
         super.stopAnimation()
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
-        statusObservation?.invalidate()
-        statusObservation = nil
         NotificationCenter.default.removeObserver(self)
         backgroundPlayer?.pause()
-        overlayPlayer?.pause()
-        backgroundLayer?.removeFromSuperlayer()
-        overlayLayer?.removeFromSuperlayer()
         backgroundPlayer = nil
-        overlayPlayer = nil
+        backgroundLayer?.removeFromSuperlayer()
         backgroundLayer = nil
-        overlayLayer = nil
         backgroundLooper = nil
+        overlayLayer?.removeFromSuperlayer()
+        overlayLayer = nil
     }
 
     // MARK: - Setup
@@ -66,26 +238,21 @@ class AustinSaverView: ScreenSaverView {
             NSLog("AustinSaver: NO LAYER")
             return
         }
-
         layer.backgroundColor = NSColor.black.cgColor
 
         let assetsBase = findAssetsDirectory()
         NSLog("AustinSaver: Assets dir = \(assetsBase.path)")
 
-        let bgVideos = findVideos(in: assetsBase.appendingPathComponent(backgroundsFolder))
-        let allEffects = findVideos(in: assetsBase.appendingPathComponent(effectsFolder))
+        // Load background videos
+        let bgVideos = findFiles(in: assetsBase.appendingPathComponent(backgroundsFolder), extensions: ["mp4", "mov", "m4v"])
 
-        // Filter out the pre-composited screensaver and any non-effect files
-        overlayClips = allEffects.filter { url in
-            let name = url.lastPathComponent
-            return name.hasSuffix("_final.mp4") && !name.contains("screensaver")
-        }.shuffled()
+        // Load TTE effect data
+        let tteFiles = findFiles(in: assetsBase.appendingPathComponent(effectsFolder), extensions: ["tte"])
+        effects = tteFiles.compactMap { TTEBinaryLoader.load(from: $0) }.shuffled()
+        NSLog("AustinSaver: Loaded \(effects.count) effects, \(bgVideos.count) backgrounds")
 
-        NSLog("AustinSaver: Found \(bgVideos.count) backgrounds, \(overlayClips.count) effects (filtered from \(allEffects.count))")
-
-        // Setup background video player
+        // Setup background video
         if let bgVideo = bgVideos.randomElement() {
-            NSLog("AustinSaver: Background video = \(bgVideo.lastPathComponent)")
             let bgItem = AVPlayerItem(url: bgVideo)
             let bgPlayer = AVQueuePlayer(playerItem: bgItem)
             backgroundLooper = AVPlayerLooper(player: bgPlayer, templateItem: bgItem)
@@ -96,123 +263,98 @@ class AustinSaverView: ScreenSaverView {
             bgLayer.videoGravity = .resizeAspectFill
             bgLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             layer.addSublayer(bgLayer)
-
             self.backgroundPlayer = bgPlayer
             self.backgroundLayer = bgLayer
             bgPlayer.play()
         }
 
-        if !overlayClips.isEmpty {
-            setupNextOverlay()
-        }
-    }
-
-    private func setupNextOverlay() {
-        guard let layer = self.layer, !overlayClips.isEmpty else {
-            NSLog("AustinSaver: setupNextOverlay guard failed - layer=\(self.layer != nil) clips=\(overlayClips.count)")
-            return
-        }
-
-        // Clean up previous
-        watchdogTimer?.invalidate()
-        statusObservation?.invalidate()
-        overlayPlayer?.pause()
-        overlayLayer?.removeFromSuperlayer()
-        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
-        NotificationCenter.default.removeObserver(self, name: NSNotification.Name.AVPlayerItemFailedToPlayToEndTime, object: nil)
-
-        let clip = overlayClips[currentOverlayIndex % overlayClips.count]
-        currentOverlayIndex += 1
-        NSLog("AustinSaver: Playing effect #\(currentOverlayIndex): \(clip.lastPathComponent)")
-
-        // Reshuffle when we've gone through all clips
-        if currentOverlayIndex % overlayClips.count == 0 {
-            overlayClips.shuffle()
-            NSLog("AustinSaver: Reshuffled effects")
-        }
-
-        let item = AVPlayerItem(url: clip)
-        let player = AVQueuePlayer(playerItem: item)
-        player.isMuted = true
-
-        let ovLayer = AVPlayerLayer(player: player)
+        // Setup overlay layer for Core Text rendering
+        let ovLayer = CALayer()
         ovLayer.frame = layer.bounds
-        ovLayer.videoGravity = .resizeAspect
         ovLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-
+        ovLayer.contentsGravity = .resizeAspect
         if let filter = CIFilter(name: "CIScreenBlendMode") {
             ovLayer.compositingFilter = filter
         }
-
         layer.addSublayer(ovLayer)
-        self.overlayPlayer = player
         self.overlayLayer = ovLayer
 
-        // Watch for successful completion
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(overlayDidFinish(_:)),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: item
-        )
+        // Configure renderer for first effect
+        if let effect = effects.first {
+            renderer.configure(gridWidth: effect.gridWidth, gridHeight: effect.gridHeight)
+        }
 
-        // Watch for playback failure
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(overlayDidFail(_:)),
-            name: NSNotification.Name.AVPlayerItemFailedToPlayToEndTime,
-            object: item
-        )
+        currentEffectIndex = 0
+        currentFrameIndex = 0
+        pauseCounter = 0
+    }
 
-        // Observe item status for load failures
-        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-            if item.status == .failed {
-                NSLog("AustinSaver: ERROR - Item failed to load: \(item.error?.localizedDescription ?? "unknown")")
-                DispatchQueue.main.async {
-                    self?.advanceToNext()
-                }
+    // MARK: - Animation
+
+    private var frameTimeAccum: Double = 0
+    private var frameCount: Int = 0
+    private var lastLogTime: Double = 0
+
+    override func animateOneFrame() {
+        guard !effects.isEmpty, let ovLayer = overlayLayer else { return }
+
+        let effect = effects[currentEffectIndex % effects.count]
+
+        // Pausing on final frame
+        if pauseCounter > 0 {
+            pauseCounter -= 1
+            if pauseCounter == 0 {
+                advanceEffect()
             }
+            return
         }
 
-        // Watchdog: if nothing happens in 30s, force advance
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: false) { [weak self] _ in
-            NSLog("AustinSaver: WATCHDOG - 30s timeout, forcing next effect")
-            self?.advanceToNext()
-        }
-
-        player.play()
-    }
-
-    @objc private func overlayDidFinish(_ notification: Notification) {
-        NSLog("AustinSaver: Effect completed successfully")
-        advanceToNext()
-    }
-
-    @objc private func overlayDidFail(_ notification: Notification) {
-        let error = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription ?? "unknown"
-        NSLog("AustinSaver: ERROR - Effect failed: \(error)")
-        advanceToNext()
-    }
-
-    private func advanceToNext() {
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
-        statusObservation?.invalidate()
-        statusObservation = nil
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self else {
-                NSLog("AustinSaver: WARN - self deallocated in advanceToNext")
-                return
+        // Render current frame
+        if currentFrameIndex < effect.frames.count {
+            let start = CACurrentMediaTime()
+            let frame = effect.frames[currentFrameIndex]
+            let scale = self.window?.backingScaleFactor ?? 2.0
+            if let image = renderer.renderFrame(frame, viewSize: ovLayer.bounds.size, scale: scale) {
+                ovLayer.contents = image
+                ovLayer.contentsScale = scale
             }
-            self.setupNextOverlay()
+            let elapsed = CACurrentMediaTime() - start
+            frameTimeAccum += elapsed
+            frameCount += 1
+            let now = CACurrentMediaTime()
+            if frameCount % 60 == 0 {
+                let avgMs = (frameTimeAccum / Double(frameCount)) * 1000.0
+                let actualFps = lastLogTime > 0 ? 60.0 / (now - lastLogTime) : 0
+                NSLog("AustinSaver: render=%.1fms, actual fps=%.0f, chars=\(frame.characters.count)", avgMs, actualFps)
+                lastLogTime = now
+            }
+            // 1.5x speed: alternate between advancing 1 and 2 frames
+            currentFrameIndex += (currentFrameIndex % 2 == 0) ? 2 : 1
+        } else {
+            // Effect finished — pause on final frame then advance
+            pauseCounter = pauseFrames
         }
+    }
+
+    private func advanceEffect() {
+        currentEffectIndex += 1
+        currentFrameIndex = 0
+
+        // Reshuffle when we've gone through all
+        if currentEffectIndex >= effects.count {
+            currentEffectIndex = 0
+            effects.shuffle()
+            NSLog("AustinSaver: Reshuffled effects")
+        }
+
+        let effect = effects[currentEffectIndex]
+        renderer.configure(gridWidth: effect.gridWidth, gridHeight: effect.gridHeight)
+        NSLog("AustinSaver: Now playing: \(effect.name) (\(effect.frames.count) frames)")
     }
 
     // MARK: - Asset Discovery
 
     private func findAssetsDirectory() -> URL {
-        // Check bundle first (works in sandboxed screensaver preview)
         if let bundlePath = Bundle(for: AustinSaverView.self).resourceURL {
             let bundleFx = bundlePath.appendingPathComponent(effectsFolder)
             let fxFiles = (try? FileManager.default.contentsOfDirectory(atPath: bundleFx.path)) ?? []
@@ -222,7 +364,6 @@ class AustinSaverView: ScreenSaverView {
             }
         }
 
-        // Hardcoded fallback
         let hardcoded = URL(fileURLWithPath: "/Users/austin/Library/Application Support/AustinScreenSaver")
         let fxFiles = (try? FileManager.default.contentsOfDirectory(atPath: hardcoded.appendingPathComponent(effectsFolder).path)) ?? []
         NSLog("AustinSaver: Hardcoded path effects = \(fxFiles.count)")
@@ -234,12 +375,11 @@ class AustinSaverView: ScreenSaverView {
         return URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/AustinScreenSaver")
     }
 
-    private func findVideos(in directory: URL) -> [URL] {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+    private func findFiles(in directory: URL, extensions: [String]) -> [URL] {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
             return []
         }
-        return files.filter { ["mp4", "mov", "m4v"].contains($0.pathExtension.lowercased()) }
+        return files.filter { extensions.contains($0.pathExtension.lowercased()) }
     }
 
     // MARK: - Drawing
