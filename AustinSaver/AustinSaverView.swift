@@ -214,6 +214,8 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLayer: AVPlayerLayer?
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
+    private var videoObservation: NSKeyValueObservation?
+    private let renderLock = NSLock()
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -327,10 +329,13 @@ class AustinSaverView: ScreenSaverView {
 
         // Setup background video
         if let bgVideo = bgVideos.randomElement() {
+            NSLog("AustinSaver: Loading background: \(bgVideo.lastPathComponent)")
+            let videoStartTime = CACurrentMediaTime()
             let bgItem = AVPlayerItem(url: bgVideo)
             let bgPlayer = AVQueuePlayer(playerItem: bgItem)
             backgroundLooper = AVPlayerLooper(player: bgPlayer, templateItem: bgItem)
             bgPlayer.isMuted = true
+            bgPlayer.automaticallyWaitsToMinimizeStalling = false
 
             let bgLayer = AVPlayerLayer(player: bgPlayer)
             bgLayer.frame = layer.bounds
@@ -339,6 +344,19 @@ class AustinSaverView: ScreenSaverView {
             layer.addSublayer(bgLayer)
             self.backgroundPlayer = bgPlayer
             self.backgroundLayer = bgLayer
+
+            // Profile: observe when the video actually starts playing
+            self.videoObservation = bgPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+                if player.timeControlStatus == .playing {
+                    let elapsed = CACurrentMediaTime() - videoStartTime
+                    NSLog("AustinSaver: Background video PLAYING in %.0fms", elapsed * 1000)
+                    self?.videoObservation?.invalidate()
+                    self?.videoObservation = nil
+                } else if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                    let elapsed = CACurrentMediaTime() - videoStartTime
+                    NSLog("AustinSaver: Background video BUFFERING at %.0fms", elapsed * 1000)
+                }
+            }
             bgPlayer.play()
         }
 
@@ -382,6 +400,9 @@ class AustinSaverView: ScreenSaverView {
     private var cachedLayerSize: CGSize = .zero
 
     private func renderNextFrame() {
+        guard renderLock.try() else { return }  // Skip if another render is in-flight
+        defer { renderLock.unlock() }
+
         guard !effects.isEmpty else { return }
 
         let effect = effects[currentEffectIndex % effects.count]
