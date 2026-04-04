@@ -215,7 +215,7 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
     private var videoObservation: NSKeyValueObservation?
-    private let renderLock = NSLock()
+    private let renderSemaphore = DispatchSemaphore(value: 1)
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -400,8 +400,9 @@ class AustinSaverView: ScreenSaverView {
     private var cachedLayerSize: CGSize = .zero
 
     private func renderNextFrame() {
-        guard renderLock.try() else { return }  // Skip if another render is in-flight
-        defer { renderLock.unlock() }
+        // Non-blocking tryWait — only one thread renders at a time
+        guard renderSemaphore.wait(timeout: .now()) == .success else { return }
+        defer { renderSemaphore.signal() }
 
         guard !effects.isEmpty else { return }
 
