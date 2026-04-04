@@ -5,7 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SAVER_NAME="AustinSaver"
 SAVER_DIR="$HOME/Library/Screen Savers/$SAVER_NAME.saver"
 EFFECTS_DIR="$SCRIPT_DIR/effects_data"
-BG_VIDEO="/Library/Application Support/com.apple.idleassetsd/Customer/4KSDR240FPS/6D6834A4-2F0F-479A-B053-7D4DC5CB8EB7.mov"
 BUILD_DIR="$SCRIPT_DIR/AustinSaver/build"
 IDLE_TIME="${1:-120}"  # Default 2 minutes, override with first arg
 
@@ -24,12 +23,12 @@ fi
 echo "[2/5] Compiling..."
 mkdir -p "$BUILD_DIR/$SAVER_NAME.saver/Contents/MacOS"
 mkdir -p "$BUILD_DIR/$SAVER_NAME.saver/Contents/Resources/AustinEffects"
-mkdir -p "$BUILD_DIR/$SAVER_NAME.saver/Contents/Resources/AustinBackgrounds"
 
 swiftc -emit-library -module-name "$SAVER_NAME" \
     -target arm64-apple-macos14.0 \
     -framework ScreenSaver -framework AVFoundation -framework AVKit \
     -framework QuartzCore -framework CoreImage -framework CoreText \
+    -framework CoreVideo \
     -o "$BUILD_DIR/$SAVER_NAME.saver/Contents/MacOS/$SAVER_NAME" \
     "$SCRIPT_DIR/AustinSaver/AustinSaverView.swift"
 
