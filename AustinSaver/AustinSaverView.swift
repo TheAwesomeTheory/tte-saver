@@ -215,7 +215,7 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
     private var videoObservation: NSKeyValueObservation?
-    private let renderSemaphore = DispatchSemaphore(value: 1)
+    private let renderQueue = DispatchQueue(label: "com.austin.screensaver.render")
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -256,7 +256,10 @@ class AustinSaverView: ScreenSaverView {
         }
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
-            view.renderNextFrame()
+            // Serial queue ensures only one render at a time, no thread chaos
+            view.renderQueue.async {
+                view.renderNextFrame()
+            }
             return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque())
         CVDisplayLinkStart(displayLink)
@@ -400,9 +403,7 @@ class AustinSaverView: ScreenSaverView {
     private var cachedLayerSize: CGSize = .zero
 
     private func renderNextFrame() {
-        // Non-blocking tryWait — only one thread renders at a time
-        guard renderSemaphore.wait(timeout: .now()) == .success else { return }
-        defer { renderSemaphore.signal() }
+        // Called on serial renderQueue — guaranteed single-threaded
 
         guard !effects.isEmpty else { return }
 
