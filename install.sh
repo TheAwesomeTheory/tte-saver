@@ -14,7 +14,12 @@ echo ""
 # Step 1: Pre-render effects if needed
 if [ ! -d "$EFFECTS_DIR" ] || [ -z "$(ls "$EFFECTS_DIR"/*.tte 2>/dev/null)" ]; then
     echo "[1/5] Pre-rendering effects..."
-    python3 "$SCRIPT_DIR/prerender_effects.py"
+    # Use uv run if available (handles uv tool installed TTE), fall back to python3
+    if command -v uv &>/dev/null; then
+        uv run --with terminaltexteffects python3 "$SCRIPT_DIR/prerender_effects.py"
+    else
+        python3 "$SCRIPT_DIR/prerender_effects.py"
+    fi
 else
     echo "[1/5] Effects already pre-rendered ($(ls "$EFFECTS_DIR"/*.tte | wc -l | tr -d ' ') effects)"
 fi

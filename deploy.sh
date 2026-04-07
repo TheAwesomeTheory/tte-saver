@@ -15,7 +15,13 @@ swiftc -target arm64-apple-macos14.0 \
   AustinSaver/AustinSaverView.swift
 
 cp AustinSaver/Info.plist AustinSaver/build/AustinSaver.saver/Contents/
-cp effects_data/*.tte AustinSaver/build/AustinSaver.saver/Contents/Resources/AustinEffects/
+
+if ls effects_data/*.tte &>/dev/null; then
+    cp effects_data/*.tte AustinSaver/build/AustinSaver.saver/Contents/Resources/AustinEffects/
+else
+    echo "Warning: No .tte files found. Run ./install.sh first to pre-render effects."
+    exit 1
+fi
 
 rm -rf "$HOME/Library/Screen Savers/AustinSaver.saver"
 cp -R AustinSaver/build/AustinSaver.saver "$HOME/Library/Screen Savers/"

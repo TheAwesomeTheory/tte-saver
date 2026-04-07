@@ -13,7 +13,7 @@ Use the **Delta Corps Priest 1** figlet font. Install if needed:
 ```bash
 brew install figlet
 curl -sL "https://raw.githubusercontent.com/xero/figlet-fonts/master/Delta%20Corps%20Priest%201.flf" \
-  -o /opt/homebrew/share/figlet/fonts/"Delta Corps Priest 1.flf"
+  -o "$(brew --prefix)/share/figlet/fonts/Delta Corps Priest 1.flf"
 ```
 
 Generate the text:

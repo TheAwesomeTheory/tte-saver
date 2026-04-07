@@ -215,8 +215,8 @@ class AustinSaverView: ScreenSaverView {
     private var backgroundLooper: AVPlayerLooper?
     private var displayLink: CVDisplayLink?
     private var videoObservation: NSKeyValueObservation?
-    private let renderQueue = DispatchQueue(label: "com.austin.screensaver.render")
-    private var renderPending: Int32 = 0
+    private let renderQueue = DispatchQueue(label: "com.austinsaver.render")
+    private let renderGate = DispatchSemaphore(value: 1)
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -258,10 +258,10 @@ class AustinSaverView: ScreenSaverView {
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
             // Skip if a render is already queued — prevents frame pileup
-            if OSAtomicCompareAndSwap32(0, 1, &view.renderPending) {
+            if view.renderGate.wait(timeout: .now()) == .success {
                 view.renderQueue.async {
                     view.renderNextFrame()
-                    OSAtomicCompareAndSwap32(1, 0, &view.renderPending)
+                    view.renderGate.signal()
                 }
             }
             return kCVReturnSuccess
@@ -326,7 +326,8 @@ class AustinSaverView: ScreenSaverView {
             let remaining = Array(shuffledFiles.dropFirst())
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let rest = remaining.compactMap { TTEBinaryLoader.load(from: $0) }
-                DispatchQueue.main.async {
+                // Append on renderQueue to avoid data race with renderNextFrame
+                self?.renderQueue.async {
                     self?.effects.append(contentsOf: rest)
                     NSLog("AustinSaver: Background loading complete. Total: \(self?.effects.count ?? 0) effects")
                 }
@@ -417,9 +418,7 @@ class AustinSaverView: ScreenSaverView {
         if pauseCounter > 0 {
             pauseCounter -= 1
             if pauseCounter == 0 {
-                DispatchQueue.main.async { [weak self] in
-                    self?.advanceEffect()
-                }
+                advanceEffect()
             }
             return
         }
@@ -462,10 +461,16 @@ class AustinSaverView: ScreenSaverView {
     }
 
     private func advanceEffect() {
+        // Called on renderQueue — all state mutations happen here
         currentEffectIndex += 1
         currentFrameIndex = 0
-        // Clear the overlay so previous effect doesn't linger
-        overlayLayer?.contents = nil
+        // Clear the overlay on main thread
+        DispatchQueue.main.async { [weak self] in
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self?.overlayLayer?.contents = nil
+            CATransaction.commit()
+        }
 
         // Reshuffle when we've gone through all
         if currentEffectIndex >= effects.count {
