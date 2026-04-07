@@ -216,7 +216,6 @@ class AustinSaverView: ScreenSaverView {
     private var displayLink: CVDisplayLink?
     private var videoObservation: NSKeyValueObservation?
     private let renderQueue = DispatchQueue(label: "com.austinsaver.render")
-    private let renderGate = DispatchSemaphore(value: 1)
 
     // TTE overlay
     private var overlayLayer: CALayer?
@@ -257,12 +256,10 @@ class AustinSaverView: ScreenSaverView {
         }
         CVDisplayLinkSetOutputCallback(displayLink, { (_, _, _, _, _, userInfo) -> CVReturn in
             let view = Unmanaged<AustinSaverView>.fromOpaque(userInfo!).takeUnretainedValue()
-            // Skip if a render is already queued — prevents frame pileup
-            if view.renderGate.wait(timeout: .now()) == .success {
-                view.renderQueue.async {
-                    view.renderNextFrame()
-                    view.renderGate.signal()
-                }
+            // Render synchronously on the serial queue — blocks CVDisplayLink thread
+            // so it naturally skips callbacks if render takes too long
+            view.renderQueue.sync {
+                view.renderNextFrame()
             }
             return kCVReturnSuccess
         }, Unmanaged.passUnretained(self).toOpaque())
