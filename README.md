@@ -1,4 +1,4 @@
-# AustinSaver
+# TTESaver
 
 A custom macOS screensaver that renders 37 animated terminal text effects in real-time using Core Text and composites them over any background video via screen-blend compositing. No pre-baked video files — effects are rendered live at 60fps on a CVDisplayLink high-priority thread.
 
