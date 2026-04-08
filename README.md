@@ -1,6 +1,10 @@
 # AustinSaver
 
-A custom macOS screensaver that renders animated terminal text effects over Apple's built-in aerial videos. Powered by [TerminalTextEffects](https://chrisbuilds.github.io/terminaltexteffects/).
+A custom macOS screensaver that renders 37 animated terminal text effects in real-time using Core Text and composites them over any background video via screen-blend compositing. No pre-baked video files — effects are rendered live at 60fps on a CVDisplayLink high-priority thread.
+
+By default, it layers itself over whatever Apple aerial videos you have downloaded (the same ones macOS uses for its built-in screensaver). Drop your own videos in and it works with those too.
+
+Powered by [TerminalTextEffects](https://chrisbuilds.github.io/terminaltexteffects/).
 
 ![demo](demo.gif)
 
