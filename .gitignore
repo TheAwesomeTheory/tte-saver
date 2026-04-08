@@ -21,3 +21,10 @@ screensavers/
 __pycache__/
 !demo.mp4
 !demo.gif
+# Metal/3D model files
+*.glb
+*.obj
+*.mtl
+*.jpg
+metal_test
+model_viewer
