@@ -19,3 +19,4 @@ screensavers/
 
 # Python
 __pycache__/
+!demo.mp4

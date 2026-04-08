@@ -5,10 +5,10 @@ class TestDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let frame = NSRect(x: 0, y: 0, width: 1280, height: 720)
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "AustinSaver Test"
-        window.center()
+        let screen = NSScreen.main!
+        let frame = screen.frame
+        window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.level = .screenSaver
 
         if let view = AustinSaverView(frame: frame, isPreview: false) {
             window.contentView = view

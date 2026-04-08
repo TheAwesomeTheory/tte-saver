@@ -2,7 +2,7 @@
 
 A custom macOS screensaver that renders animated terminal text effects over Apple's built-in aerial videos. Powered by [TerminalTextEffects](https://chrisbuilds.github.io/terminaltexteffects/).
 
-https://github.com/user-attachments/assets/placeholder
+https://github.com/TheAwesomeTheory/tte-saver/raw/main/demo.mp4
 
 ## Quick Start
 
